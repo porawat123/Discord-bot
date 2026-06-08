@@ -10,9 +10,11 @@ from keep_alive import keep_alive
 def _make_client():
     return MongoClient(
         os.environ["MONGODB_URI"],
-        serverSelectionTimeoutMS=5000,
-        connectTimeoutMS=5000,
-        socketTimeoutMS=10000,
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=15000,
+        tls=True,
+        tlsAllowInvalidCertificates=True,
     )
 
 _client = _make_client()
