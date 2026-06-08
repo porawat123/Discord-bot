@@ -23,11 +23,11 @@ def get_user(data, user_id):
     uid = str(user_id)
     if uid not in data:
         data[uid] = {"coins": 0, "xp": 0, "level": 1, "last_work": 0, "warnings": 0, "title": "", "inventory": []}
-    if "title" not in data[uid]:
-        data[uid]["title"] = ""
-    if "inventory" not in data[uid]:
-        data[uid]["inventory"] = []
-    return data[uid]
+    u = data[uid]
+    for key, default in [("title", ""), ("inventory", []), ("last_fish", 0), ("last_mine", 0), ("last_checkin", 0)]:
+        if key not in u:
+            u[key] = default
+    return u
 
 def xp_for_level(level):
     return level * 100
@@ -82,6 +82,31 @@ WORK_RESPONSES = [
 ]
 SLOT_SYMBOLS = ["🍒", "🍋", "🍊", "🍇", "⭐", "💎"]
 WORK_COOLDOWN = 90
+FISH_COOLDOWN = 60
+MINE_COOLDOWN = 120
+CHECKIN_COOLDOWN = 86400
+
+FISH_RESULTS = [
+    ("🐟 ปลาทอง",      80,  150),
+    ("🐠 ปลาการ์ตูน",  120, 200),
+    ("🐡 ปลาปักเป้า",  50,  100),
+    ("🦈 ฉลาม",        200, 400),
+    ("🦑 หมึก",         60,  130),
+    ("👢 รองเท้าเก่า",   5,   10),
+    ("🪨 ก้อนหิน",      1,    5),
+    ("🎣 ไม่ได้อะไร",    0,    0),
+]
+FISH_WEIGHTS = [20, 15, 20, 5, 15, 10, 10, 5]
+
+MINE_RESULTS = [
+    ("🪨 หินธรรมดา",   10,  30),
+    ("🥈 เหล็ก",        50, 100),
+    ("🪙 ทองแดง",       70, 130),
+    ("💛 ทอง",         150, 300),
+    ("💎 เพชร",        300, 600),
+    ("🔥 ทับทิม",      200, 400),
+]
+MINE_WEIGHTS = [30, 25, 20, 15, 5, 5]
 
 @client.event
 async def on_ready():
@@ -254,6 +279,82 @@ async def buy(interaction: discord.Interaction, สินค้า: str):
     await interaction.response.send_message(
         f"✅ ซื้อ **{item['name']}** สำเร็จ!\n💰 เหรียญเหลือ: **{user['coins']}** เหรียญ"
     )
+
+# ── Extra Earn Commands ───────────────────────────────────────
+
+@tree.command(name="ตกปลา", description="ตกปลาเพื่อรับเหรียญ (cooldown 1 นาที)")
+async def fishing(interaction: discord.Interaction):
+    data = load_data()
+    user = get_user(data, interaction.user.id)
+    now = time.time()
+    remaining = FISH_COOLDOWN - (now - user["last_fish"])
+    if remaining > 0:
+        secs = int(remaining)
+        await interaction.response.send_message(f"🎣 ยังตกปลาได้อีกใน **{secs} วินาที** ครับ")
+        return
+    catch = random.choices(FISH_RESULTS, weights=FISH_WEIGHTS, k=1)[0]
+    name, min_c, max_c = catch
+    earned = random.randint(min_c, max_c) if max_c > 0 else 0
+    user["coins"] += earned
+    user["last_fish"] = now
+    leveled_up = add_xp(user, 15)
+    save_data(data)
+    if earned == 0:
+        msg = f"🎣 {name}... วันนี้ปลาไม่กัดเลยครับ 😔"
+    else:
+        msg = f"🎣 ได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
+    if leveled_up:
+        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    await interaction.response.send_message(msg)
+
+@tree.command(name="ขุด", description="ขุดแร่เพื่อรับเหรียญ (cooldown 2 นาที)")
+async def mining(interaction: discord.Interaction):
+    data = load_data()
+    user = get_user(data, interaction.user.id)
+    now = time.time()
+    remaining = MINE_COOLDOWN - (now - user["last_mine"])
+    if remaining > 0:
+        mins = int(remaining // 60)
+        secs = int(remaining % 60)
+        await interaction.response.send_message(f"⛏️ ยังขุดได้อีกใน **{mins} นาที {secs} วินาที** ครับ")
+        return
+    ore = random.choices(MINE_RESULTS, weights=MINE_WEIGHTS, k=1)[0]
+    name, min_c, max_c = ore
+    earned = random.randint(min_c, max_c)
+    user["coins"] += earned
+    user["last_mine"] = now
+    leveled_up = add_xp(user, 20)
+    save_data(data)
+    msg = f"⛏️ ขุดได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
+    if leveled_up:
+        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    await interaction.response.send_message(msg)
+
+@tree.command(name="เช็คอิน", description="เช็คอินรายวัน รับเหรียญ+XP (วันละครั้ง)")
+async def checkin(interaction: discord.Interaction):
+    data = load_data()
+    user = get_user(data, interaction.user.id)
+    now = time.time()
+    remaining = CHECKIN_COOLDOWN - (now - user["last_checkin"])
+    if remaining > 0:
+        hrs = int(remaining // 3600)
+        mins = int((remaining % 3600) // 60)
+        await interaction.response.send_message(f"📅 เช็คอินได้อีกใน **{hrs} ชั่วโมง {mins} นาที** ครับ")
+        return
+    bonus_coins = random.randint(150, 350)
+    bonus_xp = random.randint(50, 100)
+    streak_bonus = ""
+    user["coins"] += bonus_coins
+    user["last_checkin"] = now
+    leveled_up = add_xp(user, bonus_xp)
+    save_data(data)
+    msg = (f"📅 **เช็คอินสำเร็จ!**\n"
+           f"🪙 ได้รับ **{bonus_coins}** เหรียญ\n"
+           f"✨ ได้รับ **{bonus_xp}** XP\n"
+           f"💰 ยอดรวม: **{user['coins']}** เหรียญ")
+    if leveled_up:
+        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    await interaction.response.send_message(msg)
 
 # ── Mini Games ────────────────────────────────────────────────
 
