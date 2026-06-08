@@ -1,33 +1,40 @@
 import os
 import random
-import json
 import time
 import discord
 from discord import app_commands
+from pymongo import MongoClient
 from keep_alive import keep_alive
 
-# ── Data Storage ──────────────────────────────────────────────
-DATA_FILE = "data.json"
+# ── MongoDB Setup ──────────────────────────────────────────────
+_client = MongoClient(os.environ["MONGODB_URI"])
+_db = _client["chokun_bot"]
+users_col = _db["users"]
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+DEFAULT_USER = {
+    "coins": 0, "xp": 0, "level": 1,
+    "last_work": 0, "last_fish": 0, "last_mine": 0, "last_checkin": 0,
+    "warnings": 0, "title": "", "inventory": []
+}
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def get_user(data, user_id):
+def get_user(user_id):
     uid = str(user_id)
-    if uid not in data:
-        data[uid] = {"coins": 0, "xp": 0, "level": 1, "last_work": 0, "warnings": 0, "title": "", "inventory": []}
-    u = data[uid]
-    for key, default in [("title", ""), ("inventory", []), ("last_fish", 0), ("last_mine", 0), ("last_checkin", 0)]:
-        if key not in u:
-            u[key] = default
-    return u
+    user = users_col.find_one({"_id": uid})
+    if user is None:
+        user = {"_id": uid, **DEFAULT_USER}
+        users_col.insert_one(user)
+    else:
+        changed = False
+        for k, v in DEFAULT_USER.items():
+            if k not in user:
+                user[k] = v
+                changed = True
+        if changed:
+            users_col.replace_one({"_id": uid}, user)
+    return user
+
+def save_user(user):
+    users_col.replace_one({"_id": user["_id"]}, user, upsert=True)
 
 def xp_for_level(level):
     return level * 100
@@ -43,70 +50,75 @@ def add_xp(user, amount):
 
 # ── Shop Items ────────────────────────────────────────────────
 SHOP_ITEMS = [
-    {"id": "vip",      "name": "👑 VIP",         "desc": "ตำแหน่ง VIP แสดงในโปรไฟล์",   "price": 500},
-    {"id": "pro",      "name": "⚡ Pro",          "desc": "ตำแหน่ง Pro แสดงในโปรไฟล์",   "price": 300},
-    {"id": "rich",     "name": "💎 เศรษฐี",       "desc": "ตำแหน่งเศรษฐีแสดงในโปรไฟล์", "price": 1000},
-    {"id": "lucky",    "name": "🍀 โชคดี",        "desc": "ตำแหน่งโชคดีแสดงในโปรไฟล์",  "price": 200},
-    {"id": "boost",    "name": "🚀 XP Booster",   "desc": "รับ XP x2 จาก /งาน 10 ครั้ง", "price": 400},
+    {"id": "vip",   "name": "👑 VIP",       "desc": "ตำแหน่ง VIP แสดงในโปรไฟล์",    "price": 500},
+    {"id": "pro",   "name": "⚡ Pro",        "desc": "ตำแหน่ง Pro แสดงในโปรไฟล์",    "price": 300},
+    {"id": "rich",  "name": "💎 เศรษฐี",     "desc": "ตำแหน่งเศรษฐีแสดงในโปรไฟล์",  "price": 1000},
+    {"id": "lucky", "name": "🍀 โชคดี",      "desc": "ตำแหน่งโชคดีแสดงในโปรไฟล์",   "price": 200},
+    {"id": "boost", "name": "🚀 XP Booster", "desc": "รับ XP x2 จาก /งาน 10 ครั้ง",  "price": 400},
 ]
 
-# ── Bot Setup ─────────────────────────────────────────────────
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+# ── Cooldowns ─────────────────────────────────────────────────
+WORK_COOLDOWN    = 90
+FISH_COOLDOWN    = 60
+MINE_COOLDOWN    = 120
+CHECKIN_COOLDOWN = 86400
 
+# ── Response Lists ────────────────────────────────────────────
 HELLO_RESPONSES = [
     "สวัสดีครับ 👋", "หวัดดีครับ! มีอะไรให้ช่วยไหม? 😊",
-    "ยินดีต้อนรับครับ 🎉", "อ้าว มาแล้วหรอ! สวัสดีครับ 😄", "เฮ้! ดีใจที่เห็นครับ 🙌",
+    "ยินดีต้อนรับครับ 🎉", "อ้าว มาแล้วหรอ! สวัสดีครับ 😄",
 ]
 HUNGRY_RESPONSES = [
-    "ไปหาอะไรกินในตู้เย็นไหมครับ 🍱", "ข้าวกล่องอยู่ในตู้เย็นนะครับ ลองเปิดดูสิ 🥡",
-    "หิวแล้วหรอ? สั่ง Grab Food เลยครับ 🛵", "มาม่าไม่เคยทำให้ผิดหวังนะครับ 🍜",
-    "ขนมถุงอยู่ตรงไหนก็ไปหาดูนะครับ 🍪", "ออกไปซื้อข้าวข้างนอกก็ได้ครับ 🌤️",
+    "ไปหาอะไรกินในตู้เย็นไหมครับ 🍱", "หิวแล้วหรอ? สั่ง Grab Food เลยครับ 🛵",
+    "มาม่าไม่เคยทำให้ผิดหวังนะครับ 🍜", "ออกไปซื้อข้าวข้างนอกก็ได้ครับ 🌤️",
 ]
 FORTUNE_RESPONSES = [
-    "ดวงวันนี้ดีมากครับ ⭐ มีโชคลาภรออยู่!", "ระวังเรื่องการเงินหน่อยนะครับ 💸 แต่โดยรวมโอเค",
-    "วันนี้ดวงความรักมาแรงครับ ❤️ เปิดใจไว้เลย", "ดวงวันนี้กลางๆ ครับ ขึ้นอยู่กับตัวเองเลย",
-    "โชคดีมากครับวันนี้! 🍀", "ดวงการงานดีครับ วันนี้เหมาะทำสิ่งใหม่ๆ 🚀",
+    "ดวงวันนี้ดีมากครับ ⭐ มีโชคลาภรออยู่!", "ระวังเรื่องการเงินหน่อยนะครับ 💸",
+    "วันนี้ดวงความรักมาแรงครับ ❤️", "โชคดีมากครับวันนี้! 🍀",
 ]
 TIRED_RESPONSES = [
     "พักก่อนนะครับ ร่างกายสำคัญกว่างาน 💙", "เหนื่อยก็หยุดพักได้ครับ ไม่ต้องสู้คนเดียว 🫂",
     "ดื่มน้ำ นอนหลับ พรุ่งนี้ค่อยสู้ใหม่ครับ 😴", "คุณทำได้ดีมากแล้วครับ 🌟",
-    "ทุกอย่างจะผ่านไปได้ครับ สู้ๆ นะ 💪", "เหนื่อยแล้วก็พักได้เลยครับ 🤗",
 ]
 WORK_RESPONSES = [
-    "คุณไปส่งพัสดุและได้รับ {coins} เหรียญ 📦", "คุณขายของออนไลน์และได้รับ {coins} เหรียญ 🛒",
-    "คุณรับจ้างเขียนโค้ดและได้รับ {coins} เหรียญ 💻", "คุณออกไปตัดหญ้าและได้รับ {coins} เหรียญ 🌿",
-    "คุณช่วยพ่อค้าแบกของและได้รับ {coins} เหรียญ 💪", "คุณไปสอนพิเศษและได้รับ {coins} เหรียญ 📚",
+    "คุณไปส่งพัสดุและได้รับ {coins} เหรียญ 📦",
+    "คุณขายของออนไลน์และได้รับ {coins} เหรียญ 🛒",
+    "คุณรับจ้างเขียนโค้ดและได้รับ {coins} เหรียญ 💻",
+    "คุณออกไปตัดหญ้าและได้รับ {coins} เหรียญ 🌿",
+    "คุณไปสอนพิเศษและได้รับ {coins} เหรียญ 📚",
     "คุณรับงานฟรีแลนซ์และได้รับ {coins} เหรียญ 🎨",
 ]
 SLOT_SYMBOLS = ["🍒", "🍋", "🍊", "🍇", "⭐", "💎"]
-WORK_COOLDOWN = 90
-FISH_COOLDOWN = 60
-MINE_COOLDOWN = 120
-CHECKIN_COOLDOWN = 86400
 
-FISH_RESULTS = [
-    ("🐟 ปลาทอง",      80,  150),
-    ("🐠 ปลาการ์ตูน",  120, 200),
+FISH_RESULTS  = [
+    ("🐟 ปลาทอง",     80,  150),
+    ("🐠 ปลาการ์ตูน", 120, 200),
     ("🐡 ปลาปักเป้า",  50,  100),
-    ("🦈 ฉลาม",        200, 400),
-    ("🦑 หมึก",         60,  130),
-    ("👢 รองเท้าเก่า",   5,   10),
-    ("🪨 ก้อนหิน",      1,    5),
-    ("🎣 ไม่ได้อะไร",    0,    0),
+    ("🦈 ฉลาม",       200, 400),
+    ("🦑 หมึก",        60,  130),
+    ("👢 รองเท้าเก่า",  5,   10),
+    ("🪨 ก้อนหิน",     1,    5),
+    ("🎣 ไม่ได้อะไร",   0,    0),
 ]
-FISH_WEIGHTS = [20, 15, 20, 5, 15, 10, 10, 5]
+FISH_WEIGHTS  = [20, 15, 20, 5, 15, 10, 10, 5]
 
-MINE_RESULTS = [
-    ("🪨 หินธรรมดา",   10,  30),
-    ("🥈 เหล็ก",        50, 100),
-    ("🪙 ทองแดง",       70, 130),
-    ("💛 ทอง",         150, 300),
-    ("💎 เพชร",        300, 600),
-    ("🔥 ทับทิม",      200, 400),
+MINE_RESULTS  = [
+    ("🪨 หินธรรมดา",  10,  30),
+    ("🥈 เหล็ก",       50, 100),
+    ("🪙 ทองแดง",      70, 130),
+    ("💛 ทอง",        150, 300),
+    ("💎 เพชร",       300, 600),
+    ("🔥 ทับทิม",     200, 400),
 ]
-MINE_WEIGHTS = [30, 25, 20, 15, 5, 5]
+MINE_WEIGHTS  = [30, 25, 20, 15, 5, 5]
+
+RPS_MAP = {"ค้อน": "✊", "กระดาษ": "✋", "กรรไกร": "✌️"}
+RPS_WIN = {"ค้อน": "กรรไกร", "กระดาษ": "ค้อน", "กรรไกร": "กระดาษ"}
+
+# ── Bot Setup ─────────────────────────────────────────────────
+intents = discord.Intents.default()
+client  = discord.Client(intents=intents)
+tree    = app_commands.CommandTree(client)
 
 @client.event
 async def on_ready():
@@ -117,10 +129,9 @@ async def on_ready():
 
 @tree.command(name="hello", description="ทักทายบอท")
 async def hello(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     leveled_up = add_xp(user, 5)
-    save_data(data)
+    save_user(user)
     msg = random.choice(HELLO_RESPONSES)
     if leveled_up:
         msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
@@ -140,7 +151,7 @@ async def tired(interaction: discord.Interaction):
 
 @tree.command(name="ทาย", description="ให้บอททายว่าใช่หรือไม่ใช่")
 async def guess(interaction: discord.Interaction, คำถาม: str):
-    options = ["ใช่ครับ ✅", "ไม่ใช่ครับ ❌", "ยังบอกไม่ได้ครับ 🤔", "ลองถามใหม่อีกทีครับ 🔄", "แน่นอนเลยครับ! 💯", "อาจจะครับ... 50/50 🎲"]
+    options = ["ใช่ครับ ✅", "ไม่ใช่ครับ ❌", "ยังบอกไม่ได้ครับ 🤔", "ลองถามใหม่อีกทีครับ 🔄", "แน่นอนเลยครับ! 💯"]
     await interaction.response.send_message(f"❓ **{คำถาม}**\n→ {random.choice(options)}")
 
 @tree.command(name="สุ่มเลข", description="สุ่มตัวเลข")
@@ -152,13 +163,11 @@ async def random_number(interaction: discord.Interaction, ต่ำสุด: in
 
 @tree.command(name="งาน", description="ทำงานเพื่อรับเหรียญ (cooldown 1 นาที 30 วินาที)")
 async def work(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     now = time.time()
     remaining = WORK_COOLDOWN - (now - user["last_work"])
     if remaining > 0:
-        mins = int(remaining // 60)
-        secs = int(remaining % 60)
+        mins = int(remaining // 60); secs = int(remaining % 60)
         await interaction.response.send_message(f"⏳ ยังทำงานได้อีกใน **{mins} นาที {secs} วินาที** ครับ")
         return
     has_boost = "boost" in user.get("inventory", [])
@@ -170,38 +179,31 @@ async def work(interaction: discord.Interaction):
     user["coins"] += earned
     user["last_work"] = now
     leveled_up = add_xp(user, xp_earn)
-    save_data(data)
+    save_user(user)
     msg = random.choice(WORK_RESPONSES).format(coins=earned)
-    if has_boost:
-        msg += " *(XP Booster ใช้แล้ว!)*"
+    if has_boost: msg += " *(XP Booster ใช้แล้ว!)*"
     msg += f"\n💰 ยอดเหรียญรวม: **{user['coins']}** เหรียญ"
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 @tree.command(name="เหรียญ", description="ดูยอดเหรียญของตัวเอง")
-async def coins(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+async def coins_cmd(interaction: discord.Interaction):
+    user = get_user(interaction.user.id)
     await interaction.response.send_message(f"🪙 **{interaction.user.display_name}** มีเหรียญ **{user['coins']}** เหรียญ")
 
 @tree.command(name="โอน", description="โอนเหรียญให้สมาชิกคนอื่น")
 async def transfer(interaction: discord.Interaction, สมาชิก: discord.Member, จำนวน: int):
     if จำนวน <= 0:
-        await interaction.response.send_message("❌ จำนวนต้องมากกว่า 0 ครับ")
-        return
+        await interaction.response.send_message("❌ จำนวนต้องมากกว่า 0 ครับ"); return
     if สมาชิก.id == interaction.user.id:
-        await interaction.response.send_message("❌ โอนให้ตัวเองไม่ได้ครับ")
-        return
-    data = load_data()
-    sender = get_user(data, interaction.user.id)
-    receiver = get_user(data, สมาชิก.id)
+        await interaction.response.send_message("❌ โอนให้ตัวเองไม่ได้ครับ"); return
+    sender   = get_user(interaction.user.id)
+    receiver = get_user(สมาชิก.id)
     if sender["coins"] < จำนวน:
-        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{sender['coins']}** เหรียญ")
-        return
-    sender["coins"] -= จำนวน
+        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{sender['coins']}** เหรียญ"); return
+    sender["coins"]   -= จำนวน
     receiver["coins"] += จำนวน
-    save_data(data)
+    save_user(sender); save_user(receiver)
     await interaction.response.send_message(
         f"💸 **{interaction.user.display_name}** โอน **{จำนวน}** เหรียญให้ **{สมาชิก.display_name}** สำเร็จ!\n"
         f"💰 ยอดเหรียญของคุณเหลือ: **{sender['coins']}** เหรียญ"
@@ -211,39 +213,36 @@ async def transfer(interaction: discord.Interaction, สมาชิก: discord
 
 @tree.command(name="โปรไฟล์", description="ดูโปรไฟล์และ Level ของตัวเอง")
 async def profile(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     needed = xp_for_level(user["level"])
     bar_filled = int((user["xp"] / needed) * 10)
     bar = "█" * bar_filled + "░" * (10 - bar_filled)
     title_str = f" {user['title']}" if user.get("title") else ""
     inventory_str = ", ".join(user.get("inventory", [])) or "ว่างเปล่า"
     embed = discord.Embed(title=f"📋 โปรไฟล์ของ {interaction.user.display_name}{title_str}", color=0x5865F2)
-    embed.add_field(name="⭐ Level", value=str(user["level"]), inline=True)
-    embed.add_field(name="✨ XP", value=f"{user['xp']}/{needed}", inline=True)
-    embed.add_field(name="🪙 เหรียญ", value=str(user["coins"]), inline=True)
-    embed.add_field(name="📊 Progress", value=f"`{bar}`", inline=False)
-    embed.add_field(name="🎒 ไอเทม", value=inventory_str, inline=False)
+    embed.add_field(name="⭐ Level",     value=str(user["level"]),         inline=True)
+    embed.add_field(name="✨ XP",        value=f"{user['xp']}/{needed}",   inline=True)
+    embed.add_field(name="🪙 เหรียญ",   value=str(user["coins"]),          inline=True)
+    embed.add_field(name="📊 Progress",  value=f"`{bar}`",                  inline=False)
+    embed.add_field(name="🎒 ไอเทม",    value=inventory_str,               inline=False)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="อันดับ", description="ดู Leaderboard เหรียญของ Server")
 async def leaderboard(interaction: discord.Interaction):
-    data = load_data()
-    if not data:
-        await interaction.response.send_message("ยังไม่มีข้อมูลผู้เล่นครับ")
-        return
-    sorted_users = sorted(data.items(), key=lambda x: x[1].get("coins", 0), reverse=True)[:10]
-    embed = discord.Embed(title="🏆 อันดับเศรษฐีของ Server", color=0xFFD700)
+    top = list(users_col.find().sort("coins", -1).limit(10))
+    if not top:
+        await interaction.response.send_message("ยังไม่มีข้อมูลผู้เล่นครับ"); return
+    embed  = discord.Embed(title="🏆 อันดับเศรษฐีของ Server", color=0xFFD700)
     medals = ["🥇", "🥈", "🥉"]
-    lines = []
-    for i, (uid, udata) in enumerate(sorted_users):
+    lines  = []
+    for i, udata in enumerate(top):
         medal = medals[i] if i < 3 else f"`{i+1}.`"
         try:
-            member = interaction.guild.get_member(int(uid))
-            name = member.display_name if member else f"User#{uid[-4:]}"
+            member = interaction.guild.get_member(int(udata["_id"]))
+            name   = member.display_name if member else f"User#{udata['_id'][-4:]}"
         except Exception:
-            name = f"User#{uid[-4:]}"
+            name = f"User#{udata['_id'][-4:]}"
         lines.append(f"{medal} **{name}** — {udata.get('coins', 0)} 🪙")
     embed.description = "\n".join(lines)
     await interaction.response.send_message(embed=embed)
@@ -262,20 +261,18 @@ async def shop(interaction: discord.Interaction):
 async def buy(interaction: discord.Interaction, สินค้า: str):
     item = next((i for i in SHOP_ITEMS if i["id"] == สินค้า), None)
     if not item:
-        await interaction.response.send_message("❌ ไม่พบสินค้านี้ครับ")
-        return
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+        await interaction.response.send_message("❌ ไม่พบสินค้านี้ครับ"); return
+    user = get_user(interaction.user.id)
     if user["coins"] < item["price"]:
-        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! ต้องการ **{item['price']}** เหรียญ (มีอยู่ **{user['coins']}** เหรียญ)")
-        return
+        await interaction.response.send_message(
+            f"❌ เหรียญไม่พอครับ! ต้องการ **{item['price']}** เหรียญ (มีอยู่ **{user['coins']}** เหรียญ)"); return
     user["coins"] -= item["price"]
     if สินค้า in ["vip", "pro", "rich", "lucky"]:
         user["title"] = item["name"]
     else:
         if สินค้า not in user["inventory"]:
             user["inventory"].append(สินค้า)
-    save_data(data)
+    save_user(user)
     await interaction.response.send_message(
         f"✅ ซื้อ **{item['name']}** สำเร็จ!\n💰 เหรียญเหลือ: **{user['coins']}** เหรียญ"
     )
@@ -284,98 +281,79 @@ async def buy(interaction: discord.Interaction, สินค้า: str):
 
 @tree.command(name="ตกปลา", description="ตกปลาเพื่อรับเหรียญ (cooldown 1 นาที)")
 async def fishing(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     now = time.time()
     remaining = FISH_COOLDOWN - (now - user["last_fish"])
     if remaining > 0:
-        secs = int(remaining)
-        await interaction.response.send_message(f"🎣 ยังตกปลาได้อีกใน **{secs} วินาที** ครับ")
-        return
+        await interaction.response.send_message(f"🎣 ยังตกปลาได้อีกใน **{int(remaining)} วินาที** ครับ"); return
     catch = random.choices(FISH_RESULTS, weights=FISH_WEIGHTS, k=1)[0]
     name, min_c, max_c = catch
     earned = random.randint(min_c, max_c) if max_c > 0 else 0
     user["coins"] += earned
     user["last_fish"] = now
     leveled_up = add_xp(user, 15)
-    save_data(data)
+    save_user(user)
     if earned == 0:
         msg = f"🎣 {name}... วันนี้ปลาไม่กัดเลยครับ 😔"
     else:
         msg = f"🎣 ได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 @tree.command(name="ขุด", description="ขุดแร่เพื่อรับเหรียญ (cooldown 2 นาที)")
 async def mining(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     now = time.time()
     remaining = MINE_COOLDOWN - (now - user["last_mine"])
     if remaining > 0:
-        mins = int(remaining // 60)
-        secs = int(remaining % 60)
-        await interaction.response.send_message(f"⛏️ ยังขุดได้อีกใน **{mins} นาที {secs} วินาที** ครับ")
-        return
+        mins = int(remaining // 60); secs = int(remaining % 60)
+        await interaction.response.send_message(f"⛏️ ยังขุดได้อีกใน **{mins} นาที {secs} วินาที** ครับ"); return
     ore = random.choices(MINE_RESULTS, weights=MINE_WEIGHTS, k=1)[0]
     name, min_c, max_c = ore
     earned = random.randint(min_c, max_c)
     user["coins"] += earned
     user["last_mine"] = now
     leveled_up = add_xp(user, 20)
-    save_data(data)
+    save_user(user)
     msg = f"⛏️ ขุดได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 @tree.command(name="เช็คอิน", description="เช็คอินรายวัน รับเหรียญ+XP (วันละครั้ง)")
 async def checkin(interaction: discord.Interaction):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     now = time.time()
     remaining = CHECKIN_COOLDOWN - (now - user["last_checkin"])
     if remaining > 0:
-        hrs = int(remaining // 3600)
-        mins = int((remaining % 3600) // 60)
-        await interaction.response.send_message(f"📅 เช็คอินได้อีกใน **{hrs} ชั่วโมง {mins} นาที** ครับ")
-        return
+        hrs = int(remaining // 3600); mins = int((remaining % 3600) // 60)
+        await interaction.response.send_message(f"📅 เช็คอินได้อีกใน **{hrs} ชั่วโมง {mins} นาที** ครับ"); return
     bonus_coins = random.randint(150, 350)
-    bonus_xp = random.randint(50, 100)
-    streak_bonus = ""
+    bonus_xp    = random.randint(50, 100)
     user["coins"] += bonus_coins
     user["last_checkin"] = now
     leveled_up = add_xp(user, bonus_xp)
-    save_data(data)
+    save_user(user)
     msg = (f"📅 **เช็คอินสำเร็จ!**\n"
            f"🪙 ได้รับ **{bonus_coins}** เหรียญ\n"
            f"✨ ได้รับ **{bonus_xp}** XP\n"
            f"💰 ยอดรวม: **{user['coins']}** เหรียญ")
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 # ── Mini Games ────────────────────────────────────────────────
 
-RPS_MAP = {"ค้อน": "✊", "กระดาษ": "✋", "กรรไกร": "✌️"}
-RPS_WIN = {"ค้อน": "กรรไกร", "กระดาษ": "ค้อน", "กรรไกร": "กระดาษ"}
-
 @tree.command(name="เป่ายิ้งฉุบ", description="เล่นเป่ายิ้งฉุบกับบอท (เดิมพันเหรียญได้)")
 @app_commands.choices(ตัวเลือก=[
-    app_commands.Choice(name="✊ ค้อน", value="ค้อน"),
+    app_commands.Choice(name="✊ ค้อน",    value="ค้อน"),
     app_commands.Choice(name="✋ กระดาษ", value="กระดาษ"),
     app_commands.Choice(name="✌️ กรรไกร", value="กรรไกร"),
 ])
 async def rps(interaction: discord.Interaction, ตัวเลือก: str, เดิมพัน: int = 0):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     if เดิมพัน < 0:
-        await interaction.response.send_message("❌ เดิมพันต้องมากกว่า 0 ครับ")
-        return
+        await interaction.response.send_message("❌ เดิมพันต้องมากกว่า 0 ครับ"); return
     if เดิมพัน > user["coins"]:
-        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{user['coins']}** เหรียญ")
-        return
+        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{user['coins']}** เหรียญ"); return
     bot_choice = random.choice(list(RPS_MAP.keys()))
     player = ตัวเลือก
     if player == bot_choice:
@@ -386,25 +364,21 @@ async def rps(interaction: discord.Interaction, ตัวเลือก: str, �
         result, coins_change = "**บอทชนะครับ!** 😈", -เดิมพัน
     user["coins"] += coins_change
     leveled_up = add_xp(user, 10)
-    save_data(data)
+    save_user(user)
     msg = f"{RPS_MAP[player]} vs {RPS_MAP[bot_choice]}\n{result}"
     if เดิมพัน > 0:
         sign = "+" if coins_change >= 0 else ""
         msg += f"\n🪙 เหรียญ: {sign}{coins_change} (รวม: **{user['coins']}** เหรียญ)"
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 @tree.command(name="สล็อต", description="เล่นสล็อตเดิมพันเหรียญ")
 async def slots(interaction: discord.Interaction, เดิมพัน: int = 50):
-    data = load_data()
-    user = get_user(data, interaction.user.id)
+    user = get_user(interaction.user.id)
     if เดิมพัน <= 0:
-        await interaction.response.send_message("❌ เดิมพันต้องมากกว่า 0 ครับ")
-        return
+        await interaction.response.send_message("❌ เดิมพันต้องมากกว่า 0 ครับ"); return
     if เดิมพัน > user["coins"]:
-        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{user['coins']}** เหรียญ")
-        return
+        await interaction.response.send_message(f"❌ เหรียญไม่พอครับ! คุณมีแค่ **{user['coins']}** เหรียญ"); return
     reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
     display = " | ".join(reels)
     if reels[0] == reels[1] == reels[2]:
@@ -417,18 +391,17 @@ async def slots(interaction: discord.Interaction, เดิมพัน: int = 5
         mult, result = 2, "**ชนะนิดหน่อย!** ได้ x2"
         winnings = เดิมพัน * mult
     else:
-        result = "**แพ้แล้วครับ 😢**"
+        result   = "**แพ้แล้วครับ 😢**"
         winnings = 0
     user["coins"] += winnings - เดิมพัน
     leveled_up = add_xp(user, 15)
-    save_data(data)
+    save_user(user)
     msg = f"🎰 **[ {display} ]**\n{result}\n"
     if winnings > 0:
         msg += f"🪙 ได้รับ **{winnings}** เหรียญ! (รวม: **{user['coins']}** เหรียญ)"
     else:
         msg += f"💸 เสีย **{เดิมพัน}** เหรียญ (รวม: **{user['coins']}** เหรียญ)"
-    if leveled_up:
-        msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
+    if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** ตอนนี้คุณเป็น Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
 # ── Moderation ────────────────────────────────────────────────
@@ -436,10 +409,9 @@ async def slots(interaction: discord.Interaction, เดิมพัน: int = 5
 @tree.command(name="เตือน", description="[Admin] เตือนสมาชิก")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, สมาชิก: discord.Member, เหตุผล: str = "ไม่ระบุ"):
-    data = load_data()
-    user = get_user(data, สมาชิก.id)
+    user = get_user(สมาชิก.id)
     user["warnings"] += 1
-    save_data(data)
+    save_user(user)
     await interaction.response.send_message(
         f"⚠️ **{สมาชิก.display_name}** ได้รับการเตือนครั้งที่ {user['warnings']}\n📝 เหตุผล: {เหตุผล}"
     )
