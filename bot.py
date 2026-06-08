@@ -7,9 +7,27 @@ from pymongo import MongoClient
 from keep_alive import keep_alive
 
 # ── MongoDB Setup ──────────────────────────────────────────────
-_client = MongoClient(os.environ["MONGODB_URI"])
+def _make_client():
+    return MongoClient(
+        os.environ["MONGODB_URI"],
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=5000,
+        socketTimeoutMS=10000,
+    )
+
+_client = _make_client()
 _db = _client["chokun_bot"]
 users_col = _db["users"]
+
+def _get_col():
+    global _client, _db, users_col
+    try:
+        _client.admin.command("ping")
+    except Exception:
+        _client = _make_client()
+        _db = _client["chokun_bot"]
+        users_col = _db["users"]
+    return users_col
 
 DEFAULT_USER = {
     "coins": 0, "xp": 0, "level": 1,
@@ -18,11 +36,12 @@ DEFAULT_USER = {
 }
 
 def get_user(user_id):
+    col = _get_col()
     uid = str(user_id)
-    user = users_col.find_one({"_id": uid})
+    user = col.find_one({"_id": uid})
     if user is None:
         user = {"_id": uid, **DEFAULT_USER}
-        users_col.insert_one(user)
+        col.insert_one(user)
     else:
         changed = False
         for k, v in DEFAULT_USER.items():
@@ -30,11 +49,11 @@ def get_user(user_id):
                 user[k] = v
                 changed = True
         if changed:
-            users_col.replace_one({"_id": uid}, user)
+            col.replace_one({"_id": uid}, user)
     return user
 
 def save_user(user):
-    users_col.replace_one({"_id": user["_id"]}, user, upsert=True)
+    _get_col().replace_one({"_id": user["_id"]}, user, upsert=True)
 
 def xp_for_level(level):
     return level * 100
