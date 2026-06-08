@@ -3,6 +3,7 @@ import random
 import time
 import discord
 from discord import app_commands
+import certifi
 from pymongo import MongoClient
 from keep_alive import keep_alive
 
@@ -13,8 +14,7 @@ def _make_client():
         serverSelectionTimeoutMS=10000,
         connectTimeoutMS=10000,
         socketTimeoutMS=15000,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
+        tlsCAFile=certifi.where(),
     )
 
 _client = _make_client()
