@@ -277,14 +277,17 @@ async def fishing(interaction: discord.Interaction):
     remaining = FISH_COOLDOWN - (now - user["last_fish"])
     if remaining > 0:
         await interaction.response.send_message(f"🎣 ยังตกปลาได้อีกใน **{int(remaining)} วินาที** ครับ"); return
-    name, min_c, max_c = random.choices(FISH_RESULTS, weights=FISH_WEIGHTS, k=1)[0]
+    is_lucky = "โชคดี" in user.get("title", "")
+    weights = [25, 20, 20, 10, 15, 5, 4, 1] if is_lucky else FISH_WEIGHTS
+    name, min_c, max_c = random.choices(FISH_RESULTS, weights=weights, k=1)[0]
     earned = random.randint(min_c, max_c) if max_c > 0 else 0
     user["coins"] += earned
     user["last_fish"] = now
     leveled_up = add_xp(user, 15)
     save_data(data)
-    msg = f"🎣 {name}... วันนี้ปลาไม่กัดเลยครับ 😔" if earned == 0 else \
-          f"🎣 ได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
+    lucky_str = " 🍀" if is_lucky else ""
+    msg = f"🎣{lucky_str} {name}... วันนี้ปลาไม่กัดเลยครับ 😔" if earned == 0 else \
+          f"🎣{lucky_str} ได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
     if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
@@ -297,13 +300,16 @@ async def mining(interaction: discord.Interaction):
     if remaining > 0:
         mins = int(remaining // 60); secs = int(remaining % 60)
         await interaction.response.send_message(f"⛏️ ยังขุดได้อีกใน **{mins} นาที {secs} วินาที** ครับ"); return
-    name, min_c, max_c = random.choices(MINE_RESULTS, weights=MINE_WEIGHTS, k=1)[0]
+    is_lucky = "โชคดี" in user.get("title", "")
+    weights = [15, 22, 20, 22, 12, 9] if is_lucky else MINE_WEIGHTS
+    name, min_c, max_c = random.choices(MINE_RESULTS, weights=weights, k=1)[0]
     earned = random.randint(min_c, max_c)
     user["coins"] += earned
     user["last_mine"] = now
     leveled_up = add_xp(user, 20)
     save_data(data)
-    msg = f"⛏️ ขุดได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
+    lucky_str = " 🍀" if is_lucky else ""
+    msg = f"⛏️{lucky_str} ขุดได้ **{name}**! ขายได้ **{earned}** เหรียญ 💰\n🪙 ยอดรวม: **{user['coins']}** เหรียญ"
     if leveled_up: msg += f"\n🎉 **เลเวลอัพ!** Level {user['level']} แล้ว!"
     await interaction.response.send_message(msg)
 
